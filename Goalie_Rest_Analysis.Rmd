@@ -8,8 +8,11 @@ output: pdf_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
-
-Sys.setenv("AWS_ACCESS_KEY_ID" = "AKIAJGLJLUM6WQZD2EYQ","AWS_SECRET_ACCESS_KEY" = "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")
+library(tidyverse)
+library(reshape2)
+library(RMySQL)
+library(data.table)
+theme_set(theme_bw())
 
 s3_to_csv <- function(s3_path) {
   
@@ -22,18 +25,78 @@ s3_to_csv <- function(s3_path) {
   
 }
 
-goalie_roster <- s3_to_csv("s3://hockey-all/hockey_roster_info.csv") %>%
-      filter(playerPositionCode == "G") %>%
-      mutate(SA_Goalie = toupper(playerName)) %>%
-      group_by(playerId) %>%
-      sample_n(1) %>%
-      select(SA_Goalie, 
-             nhl_id = playerId, 
-             height = playerHeight,
-             weight = playerWeight,
-             Catches = playerShootsCatches, 
-             dob = playerBirthDate) %>%
-      distinct()
+
+
+txt <- element_text(size = 18, colour = "grey25", face = "plain")
+bold_txt <- element_text(size = 20, colour = "navy", face = "bold")
+
+theme_standard <- function(base_size = 16, base_family = "") {
+  theme_bw(base_size = base_size, base_family = base_family) +
+    theme(
+      strip.background = element_blank(), 
+      
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_line( colour = "white", size = 2), 
+      panel.grid.major.x = element_line( colour = "white", size = 2), 
+      
+      #strip.text.x = element_text(size = 24),
+      #strip.text.y = element_text(size = 24),
+      
+      panel.background = element_rect(fill="grey90"),
+      plot.background = element_rect(fill="grey90"),
+      legend.background = element_rect(fill="grey90"),
+      legend.key = element_rect(fill="grey90", size = 20),
+      legend.key.size = unit(1,"cm"),
+      
+      panel.border = element_blank(), 
+      
+      line = element_line( colour = "white", size = 2),
+      axis.text.x = element_text(angle = 90, hjust = 1),
+      text = txt, 
+      plot.title = bold_txt, 
+      
+      axis.title = txt, 
+      axis.text = txt, 
+      
+      legend.title = bold_txt, 
+      legend.text = txt ) 
+}
+
+
+goalie_list <- goalie_shot_level_prep %>%
+    filter(Catches != "") %>%
+    filter(SA_Goalie != "JEAN-FRANCOIS BERUBE") %>% 
+    group_by(SA_Goalie, Catches) %>% 
+    summarise(nhl_days = n_distinct(Date),
+              SA = n(),
+              season_cnt = n_distinct(Game_Id)) 
+
+goalie_list <- goalie_shot_level_prep %>%
+    filter(Catches != "") %>%
+    filter(SA_Goalie != "JEAN-FRANCOIS BERUBE") %>% 
+    group_by(SA_Goalie, Catches) %>% 
+    summarise(nhl_days = n_distinct(Date),
+              SA = n(),
+              season_cnt = n_distinct(Game_Id)) 
+
+
+# goalie_roster <- s3_to_csv("s3://hockey-all/hockey_roster_info.csv") %>%
+#       filter(playerPositionCode == "G") %>%
+#       mutate(SA_Goalie = toupper(playerName)) %>%
+#       group_by(playerId) %>%
+#       sample_n(1) %>%
+#       select(SA_Goalie, 
+#              nhl_id = playerId, 
+#              height = playerHeight,
+#              weight = playerWeight,
+#              playerShootsCatches, 
+#              dob = playerBirthDate) %>%
+#       distinct() %>%
+  
+goalie_roster2 <- goalie_roster %>%
+      left_join(goalie_list, by = "SA_Goalie")
+
 
 ```
 
@@ -94,11 +157,7 @@ goalie_workload_function <- function(goalie, szn) {
 
 }
 
-goalie_list <- goalie_shot_level_prep %>%
-    filter(season == "20182019") %>%
-    filter(SA_Goalie != "JEAN-FRANCOIS BERUBE") %>% 
-    group_by(SA_Goalie) %>% summarise(nhl_days = n_distinct(Date)) %>% filter(nhl_days > 5) %>%
-    select(SA_Goalie) 
+
 
 gibson <- goalie_workload_function("JOHN GIBSON","20182019")
 
@@ -124,22 +183,39 @@ goalie_games <- goalie_shot_level_prep %>%
 
 
 goal_analysis <- goalie_shot_level_prep %>%
+  left_join(goalie_list %>% select(SA_Goalie, Catches2 = Catches) %>% distinct(), by = "SA_Goalie") %>%
   filter(EmptyNet_SA == 0) %>%  
   filter(season %in% c("20152016","20162017","20172018","20182019")) %>% #
   mutate(Date = as.Date(Date),
          Strength = ifelse(Game_State %in% c("6v6","5v5","4v4","3v3"),"EV","ST"),
+         Catches = ifelse(Catches == "" | is.na(Catches), as.character(Catches2), as.character(Catches)),
+         Catches = ifelse(Catches == "" | is.na(Catches), "L", as.character(Catches))
           ) %>%
-  group_by(season, Strength, Game_State, Shooter_Handedness, Catches) %>%
+  filter(Shooter_Handedness != "U") %>%
+  group_by(season, Shooter_Handedness, Catches, Strength, Game_State) %>% #Game_State
   summarise(SA = n(),
             xGA = sum(xR * rebound_goal_probability) + sum(xG_FirstShot),
-            GA = sum(Goal))
+            GA = sum(Goal),
+            xShPct = xGA / SA,
+            ShPct = GA / SA)
+
+goal_analysis %>% group_by(Shooter_Handedness, Catches) %>% summarise(total_SA = sum(SA)) %>% group_by() %>% mutate(share_SA = total_SA / sum(total_SA))
+
+goal_trends <- goal_analysis %>% ungroup() %>% as.data.frame() %>%
+    dplyr::select(season, Shooter_Handedness, Catches, Strength, SA, Game_State, ends_with("Pct")) %>%
+    data.table::melt(id.vars = c("season", "Shooter_Handedness","Strength", "Game_State","Catches", "SA")) %>%
+    ggplot(aes(x=as.factor(season), y=value, group=interaction(variable), color = interaction(variable), size = SA)) +
+    geom_line(size=3) +
+    geom_point() +
+    facet_grid(Strength + Game_State ~ paste0("Shooter:",Shooter_Handedness) + paste0("Catches:",Catches)) +
+    ggthemes::scale_color_gdocs() +
+    scale_y_continuous(limits = c(0,NA), labels = scales::percent) +
+    theme_standard()
+
+ggsave(filename=paste0("/Users/colander1/Documents/CWA/PlotsYTD/goal_trends.png"), plot=goal_trends,  width=24, height=16)
+  
 
 
-goalie_shot_level_prep %>%
-   filter(EmptyNet_SA == 0) %>%  
-   filter(Catches == "") %>%
-   select(SA_Goalie) %>%
-    distinct()
 
 ```
 
