@@ -1,0 +1,328 @@
+---
+title: "Goalie_Workload"
+author: "Cole Anderson"
+date: "2/22/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+Sys.setenv("AWS_ACCESS_KEY_ID" = "AKIAJGLJLUM6WQZD2EYQ","AWS_SECRET_ACCESS_KEY" = "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")
+
+s3_to_csv <- function(s3_path) {
+  
+  usercsvobj <- aws.s3::get_object(s3_path)
+  csvcharobj <- rawToChar(usercsvobj)
+  con <- textConnection(csvcharobj) 
+  data <- read.csv(con) 
+  close(con) 
+  return(data)
+  
+}
+
+goalie_roster <- s3_to_csv("s3://hockey-all/hockey_roster_info.csv") %>%
+      filter(playerPositionCode == "G") %>%
+      mutate(SA_Goalie = toupper(playerName)) %>%
+      group_by(playerId) %>%
+      sample_n(1) %>%
+      select(SA_Goalie, 
+             nhl_id = playerId, 
+             height = playerHeight,
+             weight = playerWeight,
+             Catches = playerShootsCatches, 
+             dob = playerBirthDate) %>%
+      distinct()
+
+```
+
+## Goalie Workload
+
+```{r cars}
+load("~/Documents/CWA/Hockey Data/goalie_shot_level_prep.RData")
+load("/Users/colander1/Downloads/goalie_games_wresult.RData")
+load("/Users/colander1/Downloads/goalie_workload_data.RData")
+
+Lookback_Days <- 15
+
+
+goalie_workload_function <- function(goalie, szn) {
+
+    goalie_games <- goalie_shot_level_prep %>%
+          filter(SA_Goalie == goalie) %>%
+          mutate(Date = as.Date(Date)) %>%
+          group_by(SA_Goalie, season, Date, Game_Id, Home_Team) %>%
+          summarise(SA = n(),
+                    xGA = sum(xR * rebound_goal_probability) + sum(xG_FirstShot),
+                    GA = sum(Goal)) %>%
+          arrange(SA_Goalie, as.Date(Date)) %>%
+          dplyr::select(SA_Goalie, season, Game_Id, Date, SA, Home_Team, xGA, GA)
+          
+
+    goalie_days_all = data.frame(Date = seq(min(as.Date(goalie_games$Date)),Sys.Date(), by = 1)) %>%
+          left_join(goalie_games, by = "Date") %>%
+          mutate(SA = ifelse(is.na(SA),0,SA))
+    
+    print(paste0(goalie,dim(goalie_days_all)))
+          
+    rolling_wSum_SA <- data.frame()
+    
+    for(d in unique(as.Date(goalie_days_all$Date))) { 
+    
+        days_window <- goalie_days_all %>%
+            filter(as.numeric(Date) <= d & as.numeric(Date) > (as.numeric(d) - Lookback_Days)) %>%
+            mutate(weight = 1 - (( as.numeric(d) - as.numeric(Date)) / Lookback_Days),
+                   Date = as.Date(d, origin = "1970-01-01")
+                   ) %>%
+            group_by(Date) %>%
+            summarise(rolling_weighted_sum = sum(weight * SA),
+                      #rolling_weighted_points = sum(weight * Actual_Points, na.rm = T),
+                      rolling_weighted_xG_Lift = sum(weight * (xGA - GA), na.rm = T))
+        
+        rolling_wSum_SA <- rolling_wSum_SA %>% bind_rows(days_window)
+        
+    }
+    
+    rolling_wSum_SA <- rolling_wSum_SA %>%
+          mutate(Goalie = goalie,
+                 #season = season,
+                 day_num = row_number()) %>%
+          left_join(goalie_games %>% ungroup() %>% select(season, Date, xGA, GA, SA), by = "Date")
+    
+    return(rolling_wSum_SA)
+
+}
+
+goalie_list <- goalie_shot_level_prep %>%
+    filter(season == "20182019") %>%
+    filter(SA_Goalie != "JEAN-FRANCOIS BERUBE") %>% 
+    group_by(SA_Goalie) %>% summarise(nhl_days = n_distinct(Date)) %>% filter(nhl_days > 5) %>%
+    select(SA_Goalie) 
+
+gibson <- goalie_workload_function("JOHN GIBSON","20182019")
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+
+goalie = "CARTER HART"
+
+goalie_games <- goalie_shot_level_prep %>%
+          filter(SA_Goalie == goalie) %>%
+          mutate(Date = as.Date(Date),
+                 Strength = ifelse(Game_State %in% c("6v6","5v5","4v4","3v3"),"EV","ST"),
+                  ) %>%
+          group_by(SA_Goalie, season, Strength, Game_State) %>%
+          summarise(SA = n(),
+                    xGA = sum(xR * rebound_goal_probability) + sum(xG_FirstShot),
+                    GA = sum(Goal))
+
+
+goal_analysis <- goalie_shot_level_prep %>%
+  filter(EmptyNet_SA == 0) %>%  
+  filter(season %in% c("20152016","20162017","20172018","20182019")) %>% #
+  mutate(Date = as.Date(Date),
+         Strength = ifelse(Game_State %in% c("6v6","5v5","4v4","3v3"),"EV","ST"),
+          ) %>%
+  group_by(season, Strength, Game_State, Shooter_Handedness, Catches) %>%
+  summarise(SA = n(),
+            xGA = sum(xR * rebound_goal_probability) + sum(xG_FirstShot),
+            GA = sum(Goal))
+
+
+goalie_shot_level_prep %>%
+   filter(EmptyNet_SA == 0) %>%  
+   filter(Catches == "") %>%
+   select(SA_Goalie) %>%
+    distinct()
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+load("/Users/colander1/Downloads/goalie_games_wresult.RData")
+load("/Users/colander1/Downloads/goalie_workload_data.RData")
+
+Lookback_Days <- 15
+
+
+goalie_workload_function <- function(goalie, szn) {
+
+    goalie_games <- goalie_shot_level_prep %>%
+          filter(SA_Goalie == goalie) %>%
+          #filter(season == szn) %>% ### 20182019
+          mutate(Date = as.Date(Date)) %>%
+          group_by(SA_Goalie, season, Date, Game_Id, Home_Team) %>%
+          summarise(SA = n(),
+                    xGA = sum(xR * rebound_goal_probability) + sum(xG_FirstShot),
+                    GA = sum(Goal)) %>%
+          arrange(SA_Goalie, as.Date(Date)) %>%
+          dplyr::select(SA_Goalie, season, Game_Id, Date, SA, Home_Team, xGA, GA)
+          
+
+    goalie_days_all = data.frame(Date = seq(min(as.Date(goalie_games$Date)),Sys.Date(), by = 1)) %>%
+          left_join(goalie_games, by = "Date") %>%
+          mutate(SA = ifelse(is.na(SA),0,SA))
+    
+    print(paste0(goalie,dim(goalie_days_all)))
+          
+    rolling_wSum_SA <- data.frame()
+    
+    for(d in unique(as.Date(goalie_days_all$Date))) { 
+    
+        days_window <- goalie_days_all %>%
+            filter(as.numeric(Date) <= d & as.numeric(Date) > (as.numeric(d) - Lookback_Days)) %>%
+            mutate(weight = 1 - (( as.numeric(d) - as.numeric(Date)) / Lookback_Days),
+                   Date = as.Date(d, origin = "1970-01-01")
+                   ) %>%
+            group_by(Date) %>%
+            summarise(rolling_weighted_sum = sum(weight * SA),
+                      #rolling_weighted_points = sum(weight * Actual_Points, na.rm = T),
+                      rolling_weighted_xG_Lift = sum(weight * (xGA - GA), na.rm = T))
+        
+        rolling_wSum_SA <- rolling_wSum_SA %>% bind_rows(days_window)
+        
+    }
+    
+    rolling_wSum_SA <- rolling_wSum_SA %>%
+          mutate(Goalie = goalie,
+                 #season = season,
+                 day_num = row_number()) %>%
+          left_join(goalie_games %>% ungroup() %>% select(season, Date, xGA, GA, SA), by = "Date")
+    
+    return(rolling_wSum_SA)
+
+}
+
+goalie_list <- goalie_shot_level_prep %>%
+    filter(season == "20182019") %>%
+    filter(SA_Goalie != "JEAN-FRANCOIS BERUBE") %>% 
+    group_by(SA_Goalie) %>% summarise(nhl_days = n_distinct(Date)) %>% filter(nhl_days > 5) %>%
+    select(SA_Goalie) 
+
+gibson <- goalie_workload_function("JOHN GIBSON","20182019")
+
+goalie_workload_data <- do.call(rbind,lapply(FUN=goalie_workload_function,goalie_list$SA_Goalie, "20182019"))
+
+save(goalie_workload_data, file = "/Users/colander1/Downloads/goalie_workload_data.RData")
+load("/Users/colander1/Downloads/goalie_workload_data.RData")
+
+goalie_display <- c("JOHN GIBSON")
+
+goalie_workload_1819 <- goalie_workload_data %>%
+    filter(Date >= '2018-10-01')
+
+goalie_workload_plot <- goalie_workload_1819 %>%
+      #filter(Date < Sys.Date()) %>%
+      mutate(Goalie_Lab = ifelse(Goalie %in% goalie_display,as.character(Goalie),NA),
+             Display = ifelse(Goalie %in% goalie_display, 1, 0)) %>%
+      filter(!is.na(Goalie_Lab)) %>%
+      ggplot(aes(x=Date, y = rolling_weighted_sum, group=Goalie, color=Goalie_Lab)) +
+      geom_line(data = goalie_workload_1819, aes(x=Date, y=rolling_weighted_sum), color = "grey50", alpha = 0.3) +
+      geom_line(size = 3, alpha = 0.9) +
+      #geom_smooth(method = "loess", span = 0.2) + 
+      theme_standard() +
+      ggthemes::scale_color_gdocs() +
+      scale_x_date(date_breaks = "1 month", date_labels = "%b-%y") +
+      labs(title = "Goalie Workload, 2016-18\nWeighted Shots in 15 Day Window During Season",
+           x = "Date",
+           y = "Weighted Shots in 15 Day Window\n(Linear Weighting, t0 = 1, t0-15 = 1/15)",
+           color = "Goalie") +
+      theme(legend.position = "top")
+
+ggsave(filename=paste0("/Users/colander1/Documents/CWA/PlotsYTD/goalie_workload_plot.png"), plot=goalie_workload_plot,  width=15, height=8)
+
+ 
+ 
+performance_workload_plot <- goalie_workload_data %>%
+      filter(Goalie == "SEMYON VARLAMOV") %>%
+      #group_by()
+      ggplot(aes(x = rolling_weighted_sum, y = rolling_weighted_xG_Lift)) +
+      geom_point() +
+      geom_smooth(method = "lm")
+ 
+ggsave(filename=paste0("/Users/colander1/Documents/CWA/PlotsYTD/performance_workload_plot.png"), plot=performance_workload_plot,  width=30, height=12)
+
+goalie_total_shots <- goalie_shot_level_prep %>% 
+        filter(season == "20182019") %>%
+        filter(SA_Team %in% c("BOS","TOR","T.B","CBJ","PIT","PHI","S.J","L.A","WPG","MIN","COL","NSH","WSH","N.J","VGK","ANA")) %>%
+        group_by(SA_Goalie, SA_Team) %>% 
+        summarise(total_SA = n()) %>%
+        inner_join(goalie_workload_data %>% filter(Date == Sys.Date()), by = c("SA_Goalie" = "Goalie")) %>%
+        filter(rolling_weighted_sum > 0) %>%
+        ggplot(aes(x=total_SA, rolling_weighted_sum, label = SA_Goalie, color = rolling_weighted_xG_Lift)) +
+        geom_point(size = 5) +
+        ggrepel::geom_label_repel() +
+        theme_standard() +
+        #scale_fill_distiller(type = "div", palette = "Spectral") +
+        scale_color_gradient2(low="#3182bd",high="#de2d26", mid="grey50", midpoint =0) +
+        labs(title = "Goalie Workload Headed into 2018 Playoffs\nnWeighted Shots in Last 15 Days vs Total Shots Against\n@ice_cole_data (github.com/C92Anderson/xG-Model)",
+             x="Total Season Shots",
+             y="Weighted Shots in Rolling 15 Day Window\n(Linear Weighting, t0 = 1, t0-15 = 1/15)",
+             color="Rolling\nGoals Prevented\n(Linear Weight)"
+             ) 
+
+ggsave(filename=paste0("/Users/colander1/Documents/CWA/PlotsYTD/goalie_total_shots.png"), plot=goalie_total_shots,  width=12, height=12)
+
+
+size_workload <- goalie_workload_data %>%
+      filter(!month(Date) %in% c(4:9) & season > 10) %>%
+      group_by(Goalie, season) %>%
+      summarise(average_workload = mean(rolling_weighted_sum),
+                GPAA_Shot = sum(xGA - GA)/sum(SA),
+                GPAA = sum(xGA - GA),
+                SA = sum(SA)) %>%
+      left_join(goalie_roster, by = c("Goalie" = "SA_Goalie")) %>%
+      group_by() %>%
+      mutate(size_weight = floor((weight+5) / 12) * 12,
+             size = floor(6 * weight / height) / 6,
+             Age = as.numeric(round((as.Date(paste0("10/1/",as.numeric(substr(season,1,4))), format = "%m/%d/%Y") - as.Date(dob)) / 365.25,1)),
+             Age30 = ifelse(Age >= 30,">30","<30"),
+             Weight_Perc = percent_rank(size_weight))
+
+
+size_workload_plot <- size_workload %>% 
+        filter(SA > 500) %>%
+        group_by(Goalie) %>%
+        mutate(goalie_lab = ifelse(Goalie %in% c("MATT MURRAY","PHILIPP GRUBAUER") | max(SA) > 2500, 1, 0),
+              lab = ifelse(goalie_lab == 1 & max(SA) == SA, as.character(sapply(strsplit(as.character(Goalie), ' '), function(x) x[length(x)])), NA)) %>%
+        ggplot(aes(x=average_workload, y=GPAA_Shot, label = lab, color = Age, group = size_weight)) +
+        #geom_hline(color = "grey50", yintercept = 0, inherit.aes=TRUE) + 
+        geom_point() +
+        facet_wrap(~paste0("Weight (lbs): ", round(size_weight,2),"+")) +
+        ggrepel::geom_label_repel(color = "grey25", nudge_x = -20) +
+        theme_standard() +
+        geom_smooth(method = "lm", se = FALSE) +
+        #ggthemes::scale_color_gdocs() +
+        scale_y_continuous(labels = scales::percent) +
+        scale_color_distiller(type = "div", palette = "Spectral") +
+        #scale_color_gradient2(low="#3182bd", high="grey50") +
+        labs(title = "Goalie Goals Prevented vs Average Workload by Size\n2010-2018, Minimum 500 Shots\n@ice_cole_data (github.com/C92Anderson/xG-Model)",
+             y="Season Sv % Over Expected",
+             x="Season Average Workload (Weighted Shots in Rolling 15 Day Window\n(Linear Weighting, t0 = 1, t0-15 = 1/15))",
+             color="Season\nAge"
+             ) 
+
+ggsave(filename=paste0("/Users/colander1/Documents/CWA/PlotsYTD/size_workload_plot.png"), plot=size_workload_plot,  width=12, height=12)
+
+
+size_model <- lm(data = size_workload %>% 
+                   filter(SA > 500) %>%
+                   group_by(Goalie) %>%
+                   mutate(prior_year = lag(GPAA_Shot))
+                 , GPAA_Shot ~ poly(average_workload,degree = 4,raw=TRUE) + poly(size,degree = 4,raw=TRUE) + poly(Age,degree = 4,raw=TRUE) +  poly(prior_year,degree = 5,raw=TRUE))
+
+summary(size_model)
+
+gru_workload <- data.frame()
+
+for(i in c(25:150)){
+  
+  df <- data.frame('average_workload' = 140, 'size' = 182/73, 'Age' = 26.9, 'prior_year' = 0.0152)
+  outcome <- predict(size_model, df)
+}
